@@ -1,12 +1,9 @@
-import 'dart:convert';
-
 import 'package:flutter/material.dart';
-import 'package:http/http.dart' as http;
-import 'package:shopping_list/data/categories.dart';
-import 'package:shopping_list/models/category.dart';
 
 import 'package:shopping_list/models/grocery_item.dart';
 import 'package:shopping_list/widgets/new_item.dart';
+import 'package:shopping_list/services/auth_service.dart';
+import 'package:shopping_list/services/firestore_service.dart';
 
 class GroceryList extends StatefulWidget {
   const GroceryList({super.key});
@@ -15,137 +12,420 @@ class GroceryList extends StatefulWidget {
   State<GroceryList> createState() => _GroceryListState();
 }
 
-class _GroceryListState extends State<GroceryList> {
-  List<GroceryItem> _groceryItems = [];
-  late Future<List<GroceryItem>> _loadedItems;
-  String? _error;
+class _GroceryListState extends State<GroceryList>
+    with SingleTickerProviderStateMixin {
+  final _authService = AuthService();
+  final _firestoreService = FirestoreService();
+  final _searchController = TextEditingController();
+  bool _isSearching = false;
+  String _searchQuery = '';
+  late AnimationController _fabAnimationController;
+  late Animation<double> _fabAnimation;
 
   @override
   void initState() {
     super.initState();
-    _loadedItems = _loadItems();
+    _fabAnimationController = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 300),
+    );
+    _fabAnimation = CurvedAnimation(
+      parent: _fabAnimationController,
+      curve: Curves.easeInOut,
+    );
+    _fabAnimationController.forward();
   }
 
-  Future<List<GroceryItem>> _loadItems() async {
-    final url = Uri.https(
-        'shopping-list-csc322-1a686-default-rtdb.firebaseio.com', 'shopping-list.json');
+  @override
+  void dispose() {
+    _searchController.dispose();
+    _fabAnimationController.dispose();
+    super.dispose();
+  }
 
-    final response = await http.get(url);
-
-    if (response.statusCode >= 400) {
-      throw Exception('Failed to fetch grocery items. Please try again later.');
+  List<GroceryItem> _filterItems(List<GroceryItem> items) {
+    if (_searchQuery.isEmpty) {
+      return items;
     }
-
-    if (response.body == 'null') {
-      return [];
-    }
-
-    final Map<String, dynamic> listData = json.decode(response.body);
-    final List<GroceryItem> loadedItems = [];
-    for (final item in listData.entries) {
-      final category = categories.entries
-          .firstWhere(
-              (catItem) => catItem.value.title == item.value['category'])
-          .value;
-      loadedItems.add(
-        GroceryItem(
-          id: item.key,
-          name: item.value['name'],
-          quantity: item.value['quantity'],
-          category: category,
-        ),
-      );
-    }
-    return loadedItems;
+    return items
+        .where((item) =>
+            item.name.toLowerCase().contains(_searchQuery.toLowerCase()) ||
+            item.category.title
+                .toLowerCase()
+                .contains(_searchQuery.toLowerCase()))
+        .toList();
   }
 
   void _addItem() async {
+    final userId = _authService.currentUser?.uid;
+    if (userId == null) return;
+
     final newItem = await Navigator.of(context).push<GroceryItem>(
       MaterialPageRoute(
-        builder: (ctx) => const NewItem(),
+        builder: (ctx) => NewItem(userId: userId),
       ),
     );
 
-    if (newItem == null) {
-      return;
+    if (newItem != null && mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('${newItem.name} added successfully!'),
+          duration: const Duration(seconds: 2),
+          behavior: SnackBarBehavior.floating,
+        ),
+      );
     }
+  }
 
-    setState(() {
-      _groceryItems.add(newItem);
-    });
+  void _editItem(GroceryItem item) async {
+    final userId = _authService.currentUser?.uid;
+    if (userId == null) return;
+
+    final editedItem = await Navigator.of(context).push<GroceryItem>(
+      MaterialPageRoute(
+        builder: (ctx) => NewItem(userId: userId, itemToEdit: item),
+      ),
+    );
+
+    if (editedItem != null && mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('${editedItem.name} updated successfully!'),
+          duration: const Duration(seconds: 2),
+          behavior: SnackBarBehavior.floating,
+        ),
+      );
+    }
   }
 
   void _removeItem(GroceryItem item) async {
-    final index = _groceryItems.indexOf(item);
-    setState(() {
-      _groceryItems.remove(item);
-    });
+    final userId = _authService.currentUser?.uid;
+    if (userId == null) return;
 
-    final url = Uri.https('flutter-prep-default-rtdb.firebaseio.com',
-        'shopping-list/${item.id}.json');
+    try {
+      await _firestoreService.deleteGroceryItem(userId, item.id);
 
-    final response = await http.delete(url);
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('${item.name} removed'),
+            duration: const Duration(seconds: 2),
+            behavior: SnackBarBehavior.floating,
+          ),
+        );
+      }
+    } catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Failed to delete item. Please try again.'),
+            duration: Duration(seconds: 3),
+            behavior: SnackBarBehavior.floating,
+          ),
+        );
+      }
+    }
+  }
 
-    if (response.statusCode >= 400) {
-      // Optional: Show error message
-      setState(() {
-        _groceryItems.insert(index, item);
-      });
+  Future<void> _signOut() async {
+    final shouldSignOut = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Sign Out'),
+        content: const Text('Are you sure you want to sign out?'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: const Text('Cancel'),
+          ),
+          ElevatedButton(
+            onPressed: () => Navigator.of(ctx).pop(true),
+            child: const Text('Sign Out'),
+          ),
+        ],
+      ),
+    );
+
+    if (shouldSignOut == true) {
+      await _authService.signOut();
     }
   }
 
   @override
   Widget build(BuildContext context) {
+    final userId = _authService.currentUser?.uid;
+    final userEmail = _authService.currentUser?.email ?? '';
+
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Your Groceries'),
+        title: _isSearching
+            ? TextField(
+                controller: _searchController,
+                autofocus: true,
+                style: const TextStyle(color: Colors.white),
+                decoration: const InputDecoration(
+                  hintText: 'Search groceries...',
+                  hintStyle: TextStyle(color: Colors.white70),
+                  border: InputBorder.none,
+                ),
+                onChanged: (value) {
+                  setState(() {
+                    _searchQuery = value;
+                  });
+                },
+              )
+            : const Text('Your Groceries'),
         actions: [
           IconButton(
-            onPressed: _addItem,
-            icon: const Icon(Icons.add),
+            onPressed: () {
+              setState(() {
+                _isSearching = !_isSearching;
+                if (!_isSearching) {
+                  _searchController.clear();
+                  _searchQuery = '';
+                }
+              });
+            },
+            icon: Icon(_isSearching ? Icons.close : Icons.search),
+          ),
+          PopupMenuButton<String>(
+            icon: const Icon(Icons.more_vert),
+            onSelected: (value) {
+              if (value == 'logout') {
+                _signOut();
+              }
+            },
+            itemBuilder: (context) => [
+              PopupMenuItem(
+                enabled: false,
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'Signed in as:',
+                      style: Theme.of(context).textTheme.bodySmall,
+                    ),
+                    Text(
+                      userEmail,
+                      style: const TextStyle(fontWeight: FontWeight.bold),
+                    ),
+                  ],
+                ),
+              ),
+              const PopupMenuDivider(),
+              const PopupMenuItem(
+                value: 'logout',
+                child: Row(
+                  children: [
+                    Icon(Icons.logout),
+                    SizedBox(width: 12),
+                    Text('Sign Out'),
+                  ],
+                ),
+              ),
+            ],
           ),
         ],
       ),
-      body: FutureBuilder(
-        future: _loadedItems,
-        builder: (context, snapshot) {
-          if (snapshot.connectionState == ConnectionState.waiting) {
-            return const Center(child: CircularProgressIndicator());
-          }
+      body: userId == null
+          ? const Center(child: Text('Please sign in'))
+          : StreamBuilder<List<GroceryItem>>(
+              stream: _firestoreService.getUserGroceryItems(userId),
+              builder: (context, snapshot) {
+                if (snapshot.connectionState == ConnectionState.waiting) {
+                  return const Center(child: CircularProgressIndicator());
+                }
 
-          if (snapshot.hasError) {
-            return Center(
-              child: Text(
-                snapshot.error.toString(),
-              ),
-            );
-          }
+                if (snapshot.hasError) {
+                  return Center(
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        const Icon(Icons.error_outline,
+                            size: 80, color: Colors.red),
+                        const SizedBox(height: 16),
+                        Text(
+                          'Error loading items: ${snapshot.error}',
+                          textAlign: TextAlign.center,
+                          style: const TextStyle(fontSize: 16),
+                        ),
+                      ],
+                    ),
+                  );
+                }
 
-          if (snapshot.data!.isEmpty) {
-            return const Center(child: Text('No items added yet.'));
-          }
+                final allItems = snapshot.data ?? [];
+                final filteredItems = _filterItems(allItems);
 
-          return ListView.builder(
-            itemCount: snapshot.data!.length,
-            itemBuilder: (ctx, index) => Dismissible(
-              onDismissed: (direction) {
-                _removeItem(snapshot.data![index]);
+                if (filteredItems.isEmpty) {
+                  return Center(
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Icon(
+                          _searchQuery.isEmpty
+                              ? Icons.shopping_cart_outlined
+                              : Icons.search_off,
+                          size: 80,
+                          color: Colors.grey,
+                        ),
+                        const SizedBox(height: 16),
+                        Text(
+                          _searchQuery.isEmpty
+                              ? 'No items added yet.'
+                              : 'No items match your search.',
+                          style:
+                              const TextStyle(fontSize: 18, color: Colors.grey),
+                        ),
+                        const SizedBox(height: 8),
+                        Text(
+                          _searchQuery.isEmpty
+                              ? 'Start adding items to your grocery list!'
+                              : 'Try a different search term.',
+                          style:
+                              const TextStyle(fontSize: 14, color: Colors.grey),
+                        ),
+                      ],
+                    ),
+                  );
+                }
+
+                return RefreshIndicator(
+                  onRefresh: () async {
+                    // Stream automatically refreshes
+                    await Future.delayed(const Duration(milliseconds: 500));
+                  },
+                  child: ListView.builder(
+                    padding: const EdgeInsets.all(8),
+                    itemCount: filteredItems.length,
+                    itemBuilder: (ctx, index) {
+                      final item = filteredItems[index];
+                      return Dismissible(
+                        onDismissed: (direction) => _removeItem(item),
+                        key: ValueKey(item.id),
+                        background: Container(
+                          margin: const EdgeInsets.symmetric(
+                              horizontal: 8, vertical: 4),
+                          padding: const EdgeInsets.symmetric(horizontal: 20),
+                          decoration: BoxDecoration(
+                            color: Colors.red.shade400,
+                            borderRadius: BorderRadius.circular(12),
+                          ),
+                          alignment: Alignment.centerLeft,
+                          child: const Icon(Icons.delete,
+                              color: Colors.white, size: 32),
+                        ),
+                        secondaryBackground: Container(
+                          margin: const EdgeInsets.symmetric(
+                              horizontal: 8, vertical: 4),
+                          padding: const EdgeInsets.symmetric(horizontal: 20),
+                          decoration: BoxDecoration(
+                            color: Colors.red.shade400,
+                            borderRadius: BorderRadius.circular(12),
+                          ),
+                          alignment: Alignment.centerRight,
+                          child: const Icon(Icons.delete,
+                              color: Colors.white, size: 32),
+                        ),
+                        child: Card(
+                          margin: const EdgeInsets.symmetric(
+                              horizontal: 8, vertical: 4),
+                          elevation: 2,
+                          shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(12),
+                          ),
+                          child: ListTile(
+                            onTap: () => _editItem(item),
+                            contentPadding: const EdgeInsets.symmetric(
+                              horizontal: 16,
+                              vertical: 8,
+                            ),
+                            title: Text(
+                              item.name,
+                              style: const TextStyle(
+                                fontSize: 18,
+                                fontWeight: FontWeight.w500,
+                              ),
+                            ),
+                            subtitle: Padding(
+                              padding: const EdgeInsets.only(top: 4),
+                              child: Text(
+                                item.category.title,
+                                style: TextStyle(
+                                  color: item.category.color,
+                                  fontWeight: FontWeight.w500,
+                                ),
+                              ),
+                            ),
+                            leading: Hero(
+                              tag: 'item_${item.id}',
+                              child: Container(
+                                width: 56,
+                                height: 56,
+                                decoration: BoxDecoration(
+                                  borderRadius: BorderRadius.circular(8),
+                                  color: item.category.color.withOpacity(0.2),
+                                ),
+                                child: item.imageUrl != null
+                                    ? ClipRRect(
+                                        borderRadius: BorderRadius.circular(8),
+                                        child: Image.network(
+                                          item.imageUrl!,
+                                          fit: BoxFit.cover,
+                                          errorBuilder:
+                                              (context, error, stackTrace) {
+                                            return Container(
+                                              color: item.category.color,
+                                            );
+                                          },
+                                        ),
+                                      )
+                                    : Container(
+                                        decoration: BoxDecoration(
+                                          color: item.category.color,
+                                          borderRadius:
+                                              BorderRadius.circular(8),
+                                        ),
+                                      ),
+                              ),
+                            ),
+                            trailing: Container(
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 12,
+                                vertical: 6,
+                              ),
+                              decoration: BoxDecoration(
+                                color: Theme.of(context)
+                                    .colorScheme
+                                    .primaryContainer,
+                                borderRadius: BorderRadius.circular(20),
+                              ),
+                              child: Text(
+                                item.quantity.toString(),
+                                style: TextStyle(
+                                  fontSize: 16,
+                                  fontWeight: FontWeight.bold,
+                                  color: Theme.of(context)
+                                      .colorScheme
+                                      .onPrimaryContainer,
+                                ),
+                              ),
+                            ),
+                          ),
+                        ),
+                      );
+                    },
+                  ),
+                );
               },
-              key: ValueKey(snapshot.data![index].id),
-              child: ListTile(
-                title: Text(snapshot.data![index].name),
-                leading: Container(
-                  width: 24,
-                  height: 24,
-                  color: snapshot.data![index].category.color,
-                ),
-                trailing: Text(
-                  snapshot.data![index].quantity.toString(),
-                ),
-              ),
             ),
-          );
-        },
+      floatingActionButton: ScaleTransition(
+        scale: _fabAnimation,
+        child: FloatingActionButton.extended(
+          onPressed: _addItem,
+          icon: const Icon(Icons.add),
+          label: const Text('Add Item'),
+        ),
       ),
     );
   }

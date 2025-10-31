@@ -7,6 +7,10 @@ class StorageService {
   // Upload image and get download URL
   Future<String?> uploadGroceryImage(String userId, String itemId, File imageFile) async {
     try {
+      if (!await imageFile.exists()) {
+        throw Exception('Image file does not exist at path: ${imageFile.path}');
+      }
+
       final ref = _storage
           .ref()
           .child('users')
@@ -14,14 +18,13 @@ class StorageService {
           .child('groceries')
           .child('$itemId.jpg');
 
-      final uploadTask = ref.putFile(imageFile);
-      final snapshot = await uploadTask;
-      final downloadUrl = await snapshot.ref.getDownloadURL();
+      await ref.putFile(imageFile);
+      final downloadUrl = await ref.getDownloadURL();
       
       return downloadUrl;
     } catch (e) {
       print('Error uploading image: $e');
-      return null;
+      rethrow;
     }
   }
 
